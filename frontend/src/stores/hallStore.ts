@@ -1,11 +1,19 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
-import { db, readUiPrefs, writeUiPrefs } from '@/utils/db'
+import { createId, db, readUiPrefs, writeUiPrefs } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
+import {
+  planInsertion,
+  sortLayersOuterToInner,
+  type LayerAnchor,
+  type LayerAnchorSide
+} from '@/utils/layerOrder'
 import type { Element } from '@/types/element'
 import type { Hall, HallStat } from '@/types/hall'
 import type { PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
+
+export type { LayerAnchor, LayerAnchorSide }
 
 /**
  * 殿宇 store：维护殿宇列表、当前选中殿宇，并派生出各殿宇的病害统计。
@@ -119,29 +127,108 @@ export const useHallStore = defineStore('hall', () => {
     await elementsTable.update(id, patch)
   }
 
-  async function createLayer(
-    payload: Omit<PaintLayer, 'id' | 'createdAt' | 'updatedAt'>
+  /**
+   * 补录层位：不允许自报层号，而是放在参照层（anchor.layerId）的外侧或内侧，
+   * 插入后该构件层位由外至内重新排成连续 1..n；新层之后的层位依次顺移。
+   * 层位身份（id）不变，挂在各层上的病害仍留在原物理层。
+   * 构件尚无层位时 anchor 可为 null，新层即第 1 层。
+   */
+  async function insertLayer(
+    payload: {
+      elementId: string
+      patternName: PaintLayer['patternName']
+      pigment: PaintLayer['pigment']
+      thicknessMm: number
+      anchor?: LayerAnchor | null
+    }
   ): Promise<PaintLayer> {
-    const layer = await layersTable.create(payload, 'lay')
-    await syncLayerCount(payload.elementId)
-    return layer
+    const now = Date.now()
+    const newId = createId('lay')
+    let created: PaintLayer
+    await db.transaction('rw', [db.layers, db.elements], async () => {
+      const existing = sortLayersOuterToInner(
+        await db.layers.where('elementId').equals(payload.elementId).toArray()
+      )
+      const anchor = payload.anchor ?? null
+      const { insertIndex } = planInsertion(
+        existing,
+        anchor?.layerId ?? null,
+        (anchor?.side ?? 'inside') as LayerAnchorSide
+      )
+      const orderedIds = existing.map((layer) => layer.id)
+      orderedIds.splice(insertIndex, 0, newId)
+
+      const newLevel = orderedIds.indexOf(newId) + 1
+      created = {
+        id: newId,
+        elementId: payload.elementId,
+        level: newLevel,
+        patternName: payload.patternName,
+        pigment: payload.pigment,
+        thicknessMm: payload.thicknessMm,
+        createdAt: now,
+        updatedAt: now
+      }
+
+      // 仅改号落点之后的层位；其余层号不动
+      const shifts: PaintLayer[] = []
+      orderedIds.forEach((id, index) => {
+        const targetLevel = index + 1
+        const layer = existing.find((item) => item.id === id)
+        if (layer && layer.level !== targetLevel) {
+          shifts.push({ ...layer, level: targetLevel, updatedAt: now })
+        }
+      })
+
+      if (shifts.length > 0) await db.layers.bulkPut(shifts)
+      await db.layers.put(created)
+
+      const element = await db.elements.get(payload.elementId)
+      if (element) {
+        const count = orderedIds.length
+        if (element.layerCount !== count) {
+          await db.elements.put({ ...element, layerCount: count, updatedAt: now })
+        }
+      }
+    })
+    return created!
   }
 
+  /** 编辑层位只改做法 / 颜料 / 厚度；层号由补录与作废自动维护，不在这里挪动 */
   async function updateLayer(id: string, patch: Partial<PaintLayer>): Promise<void> {
-    await layersTable.update(id, patch)
-    const layer = layers.value.find((item) => item.id === id)
-    if (layer) await syncLayerCount(layer.elementId)
+    const { level: _level, ...rest } = patch
+    void _level
+    await layersTable.update(id, rest)
   }
 
+  /**
+   * 作废层位：连带删除挂在该层上的病害与工序（沿用原级联规则），
+   * 同事务内把其余层位由外至内收紧为 1..n，层位 id 不变，病害仍留在原层。
+   */
   async function removeLayer(id: string): Promise<void> {
     const layer = layers.value.find((item) => item.id === id)
     const decayIds = decays.value.filter((decay) => decay.layerId === id).map((decay) => decay.id)
-    await db.transaction('rw', [db.layers, db.decays, db.repairSteps], async () => {
+    await db.transaction('rw', [db.layers, db.decays, db.repairSteps, db.elements], async () => {
       await db.repairSteps.where('decayId').anyOf(decayIds).delete()
       await db.decays.bulkDelete(decayIds)
       await db.layers.delete(id)
+
+      if (layer) {
+        const remaining = await db.layers.where('elementId').equals(layer.elementId).toArray()
+        const now = Date.now()
+        const updates: PaintLayer[] = []
+        sortLayersOuterToInner(remaining).forEach((item, index) => {
+          const level = index + 1
+          if (item.level !== level) updates.push({ ...item, level, updatedAt: now })
+        })
+        if (updates.length > 0) await db.layers.bulkPut(updates)
+
+        const element = await db.elements.get(layer.elementId)
+        if (element && element.layerCount !== remaining.length) {
+          await db.elements.put({ ...element, layerCount: remaining.length, updatedAt: now })
+        }
+      }
     })
-    if (layer) await syncLayerCount(layer.elementId)
   }
 
   /** 级联删除构件及其层位、病害、工序 */
@@ -257,7 +344,7 @@ export const useHallStore = defineStore('hall', () => {
     createElement,
     updateElement,
     removeElement,
-    createLayer,
+    insertLayer,
     updateLayer,
     removeLayer,
     syncLayerCount,

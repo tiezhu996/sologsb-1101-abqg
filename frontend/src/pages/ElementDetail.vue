@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import type { TreeNodeData } from 'element-plus/es/components/tree/src/tree.type'
-import { ArrowLeft, Delete, Edit, Plus, Warning } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Delete, Edit, Plus, Warning } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
@@ -11,6 +11,7 @@ import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
 import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
+import type { LayerAnchorSide } from '@/utils/layerOrder'
 import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
 
 const route = useRoute()
@@ -49,12 +50,14 @@ const elementForm = reactive<{
 })
 
 const layerForm = reactive<{
-  level: number
+  anchorId: string
+  anchorSide: LayerAnchorSide
   patternName: PatternName
   pigment: Pigment
   thicknessMm: number
 }>({
-  level: 1,
+  anchorId: '',
+  anchorSide: 'inside',
   patternName: '旋子',
   pigment: '石青',
   thicknessMm: 1.5
@@ -80,7 +83,6 @@ const elementRules: FormRules = {
 }
 
 const layerRules: FormRules = {
-  level: [{ required: true, message: '请填写层位序号', trigger: 'change' }],
   thicknessMm: [{ required: true, message: '请填写厚度', trigger: 'change' }]
 }
 
@@ -156,6 +158,36 @@ const selectedElement = computed<Element | null>(
 const selectedLayers = computed<PaintLayer[]>(() =>
   selectedElement.value ? hallStore.layersOfElement(selectedElement.value.id) : []
 )
+
+/** 补录时的参照层选项：编号始终连续，直接按 1..n 展示 */
+const anchorOptions = computed(() =>
+  selectedLayers.value.map((layer) => ({
+    id: layer.id,
+    label: `第 ${layer.level} 层 · ${layer.patternName} · ${layer.pigment}`
+  }))
+)
+
+/** 补录后新层落点与整体重排预览 */
+const insertionPreview = computed(() => {
+  const anchorId = layerForm.anchorId
+  const side = layerForm.anchorSide
+  const anchorIndex = selectedLayers.value.findIndex((layer) => layer.id === anchorId)
+  const insertIndex =
+    selectedLayers.value.length === 0
+      ? 0
+      : anchorIndex < 0
+        ? selectedLayers.value.length
+        : side === 'outside'
+          ? anchorIndex
+          : anchorIndex + 1
+  const newLevel = insertIndex + 1
+  const shifted = selectedLayers.value.length - insertIndex
+  return {
+    newLevel,
+    total: selectedLayers.value.length + 1,
+    shifted
+  }
+})
 
 const selectedStats = computed(() => {
   const element = selectedElement.value
@@ -260,21 +292,40 @@ async function removeElement(element: Element): Promise<void> {
   ElMessage.success('构件已删除')
 }
 
-function openLayerDialog(layer?: PaintLayer): void {
+function openInsertDialog(layer: PaintLayer, command: string): void {
+  openLayerDialog(layer, command === 'outside' ? 'outside' : 'inside')
+}
+
+/** preset：从某一层行内点「补录」时带上参照层 */
+function openLayerDialog(layer?: PaintLayer, presetSide?: LayerAnchorSide): void {
   if (!selectedElement.value) {
     ElMessage.warning('请先在左侧选择一个构件')
     return
   }
   if (layer) {
-    editingLayerId.value = layer.id
-    layerForm.level = layer.level
-    layerForm.patternName = layer.patternName
-    layerForm.pigment = layer.pigment
-    layerForm.thicknessMm = layer.thicknessMm
+    if (presetSide) {
+      // 行内「补录」：以该层为参照打开补录框，不进入编辑态
+      editingLayerId.value = null
+      layerForm.anchorId = layer.id
+      layerForm.anchorSide = presetSide
+      layerForm.patternName = '旋子'
+      layerForm.pigment = '石青'
+      layerForm.thicknessMm = 1.5
+    } else {
+      // 编辑既有层位：只改做法 / 颜料 / 厚度，层号不可手填
+      editingLayerId.value = layer.id
+      layerForm.anchorId = layer.id
+      layerForm.anchorSide = 'inside'
+      layerForm.patternName = layer.patternName
+      layerForm.pigment = layer.pigment
+      layerForm.thicknessMm = layer.thicknessMm
+    }
   } else {
+    // 补录新层：默认补在最内层
     editingLayerId.value = null
-    const levels = selectedLayers.value.map((item) => item.level)
-    layerForm.level = levels.length === 0 ? 1 : Math.max(...levels) + 1
+    const innermost = selectedLayers.value[selectedLayers.value.length - 1]
+    layerForm.anchorId = innermost?.id ?? ''
+    layerForm.anchorSide = 'inside'
     layerForm.patternName = '旋子'
     layerForm.pigment = '石青'
     layerForm.thicknessMm = 1.5
@@ -286,45 +337,44 @@ async function submitLayer(): Promise<void> {
   if (!layerFormRef.value || !selectedElement.value) return
   const valid = await layerFormRef.value.validate().catch(() => false)
   if (!valid) return
-  const duplicated = selectedLayers.value.some(
-    (layer) => layer.level === layerForm.level && layer.id !== editingLayerId.value
-  )
-  if (duplicated) {
-    ElMessage.warning(`层位序号 ${layerForm.level} 已存在，请更换`)
-    return
-  }
   if (editingLayerId.value) {
     await hallStore.updateLayer(editingLayerId.value, {
-      level: layerForm.level,
       patternName: layerForm.patternName,
       pigment: layerForm.pigment,
       thicknessMm: layerForm.thicknessMm
     })
     ElMessage.success('层位已更新')
   } else {
-    const layer = await hallStore.createLayer({
+    if (selectedLayers.value.length > 0 && !layerForm.anchorId) {
+      ElMessage.warning('请选择参照层位（新层放在哪一层的外侧或内侧）')
+      return
+    }
+    const layer = await hallStore.insertLayer({
       elementId: selectedElement.value.id,
-      level: layerForm.level,
       patternName: layerForm.patternName,
       pigment: layerForm.pigment,
-      thicknessMm: layerForm.thicknessMm
+      thicknessMm: layerForm.thicknessMm,
+      anchor: layerForm.anchorId
+        ? { layerId: layerForm.anchorId, side: layerForm.anchorSide }
+        : null
     })
     expandedLayerIds.value = Array.from(new Set([...expandedLayerIds.value, layer.id]))
-    ElMessage.success('层位已新增')
+    ElMessage.success('层位已补录，层号已按由外至内重排')
   }
   layerTableKey.value += 1
   layerDialogVisible.value = false
 }
 
 async function removeLayer(layer: PaintLayer): Promise<void> {
+  const decayCount = layerDecays(layer.id).length
   const confirmed = await ElMessageBox.confirm(
-    `删除第 ${layer.level} 层（${layer.patternName}）将同时删除该层病害记录，是否继续？`,
-    '删除确认',
-    { type: 'warning' }
+    `作废第 ${layer.level} 层（${layer.patternName}）？该层上的 ${decayCount} 条病害记录将一并删除；其余层位的层号会自动收紧（1..${selectedLayers.value.length - 1}），病害仍留在各自原层。`,
+    '作废确认',
+    { type: 'warning', confirmButtonText: '作废并收紧编号' }
   ).catch(() => false)
   if (!confirmed) return
   await hallStore.removeLayer(layer.id)
-  ElMessage.success('层位已删除')
+  ElMessage.success('层位已作废，层号已收紧')
 }
 
 function openDecayDialog(layerId: string): void {
@@ -513,7 +563,7 @@ const severityOptions = SEVERITIES
             <div class="section-card">
               <div class="section-card__head">
                 <h3>彩画层位</h3>
-                <el-button type="primary" size="small" :icon="Plus" @click="openLayerDialog()">新增层位</el-button>
+                <el-button type="primary" size="small" :icon="Plus" @click="openLayerDialog()">补录层位</el-button>
               </div>
 
               <el-table
@@ -557,7 +607,7 @@ const severityOptions = SEVERITIES
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="由外至内" prop="level" width="100" />
+                <el-table-column label="由外至内层号" prop="level" width="110" />
                 <el-table-column label="彩画做法" prop="patternName" width="110" />
                 <el-table-column label="主色颜料" width="110">
                   <template #default="{ row }">
@@ -584,13 +634,22 @@ const severityOptions = SEVERITIES
                     <span class="mono">{{ layerDecays(row.id).length }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="200">
+                <el-table-column label="操作" width="300">
                   <template #default="{ row }">
+                    <el-dropdown trigger="click" @command="(cmd: unknown) => openInsertDialog(row, String(cmd))">
+                      <el-button size="small" type="success" text :icon="Plus">补录<el-icon class="el-icon--right"><arrow-down /></el-icon></el-button>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="outside">补在该层外侧</el-dropdown-item>
+                          <el-dropdown-item command="inside">补在该层内侧</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
                     <el-button size="small" :icon="Edit" text @click="openLayerDialog(row)">编辑</el-button>
                     <el-button size="small" type="primary" text :icon="Warning" @click="openDecayDialog(row.id)">
                       挂接病害
                     </el-button>
-                    <el-button size="small" type="danger" text @click="removeLayer(row)">删除</el-button>
+                    <el-button size="small" type="danger" text @click="removeLayer(row)">作废</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -599,8 +658,8 @@ const severityOptions = SEVERITIES
                 v-if="selectedLayers.length === 0"
                 compact
                 title="尚未圈定彩画层位"
-                description="按由外至内顺序逐层登记：层位序号、彩画做法、主色颜料与厚度。"
-                action-text="新增层位"
+                description="补录第一层后，再按现场叠压关系补在任意层的外侧或内侧；层号由外至内自动连续编号，无需自报。"
+                action-text="补录层位"
                 @action="openLayerDialog()"
               />
             </div>
@@ -634,11 +693,46 @@ const severityOptions = SEVERITIES
       </template>
     </el-dialog>
 
-    <el-dialog v-model="layerDialogVisible" :title="editingLayerId ? '编辑层位' : '新增彩画层位'" width="520px">
+    <el-dialog v-model="layerDialogVisible" :title="editingLayerId ? '编辑层位' : '补录彩画层位'" width="520px">
       <el-form ref="layerFormRef" :model="layerForm" :rules="layerRules" label-width="110px">
-        <el-form-item label="由外至内序号" prop="level">
-          <el-input-number v-model="layerForm.level" :min="1" :max="20" />
-        </el-form-item>
+        <template v-if="!editingLayerId">
+          <el-form-item label="参照层位">
+            <el-select
+              v-if="anchorOptions.length > 0"
+              v-model="layerForm.anchorId"
+              class="full-width"
+              placeholder="选择把新层补在哪一层旁"
+            >
+              <el-option v-for="option in anchorOptions" :key="option.id" :label="option.label" :value="option.id" />
+            </el-select>
+            <span v-else class="muted">该构件尚无层位，本次补录即为第 1 层。</span>
+          </el-form-item>
+          <el-form-item label="放在参照层">
+            <el-radio-group v-model="layerForm.anchorSide" :disabled="anchorOptions.length === 0">
+              <el-radio value="outside">外侧（靠表层）</el-radio>
+              <el-radio value="inside">内侧（靠木骨）</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-alert
+            class="layer-insert-hint"
+            type="info"
+            :closable="false"
+            show-icon
+            :title="
+              anchorOptions.length === 0
+                ? '补录后本构件共 1 层。'
+                : `补录后新层为第 ${insertionPreview.newLevel} 层（共 ${insertionPreview.total} 层）；原第 ${insertionPreview.newLevel} 层及更内侧共 ${insertionPreview.shifted} 层顺移，病害仍留在各自原层。`
+            "
+          />
+        </template>
+        <el-alert
+          v-else
+          class="layer-insert-hint"
+          type="info"
+          :closable="false"
+          show-icon
+          title="层号由外至内自动连续维护，补录其他层或作废某层时会自动重排，此处不能手填。"
+        />
         <el-form-item label="彩画做法" prop="patternName">
           <el-select v-model="layerForm.patternName" class="full-width">
             <el-option v-for="item in patternOptions" :key="item" :label="item" :value="item" />
@@ -757,6 +851,10 @@ const severityOptions = SEVERITIES
 .layer-decays__empty {
   margin: 0;
   font-size: 13px;
+}
+
+.layer-insert-hint {
+  margin: 0 0 16px 110px;
 }
 
 .full-width {

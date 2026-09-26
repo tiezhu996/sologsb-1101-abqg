@@ -83,11 +83,15 @@ npm run preview    # 本地预览构建产物（http://localhost:21801）
 | --- | --- | --- | --- |
 | Hall 殿宇 | `src/types/hall.ts` | `id` `name` `era` `structureType`（大木/小式） `roofType`（庑殿/歇山/悬山） | 新建后进入构件录入 |
 | Element 构件 | `src/types/element.ts` | `id` `hallId` `position`（檐下/室内/梁枋/斗拱/天花） `name` `layerCount` `baseLayer` `status`（完好/观察/待修） | 按殿宇与部位二维筛选 |
-| PaintLayer 彩画层位 | `src/types/layer.ts` | `id` `elementId` `level`（由外至内） `patternName`（旋子/和玺/苏式） `pigment`（石青/石绿/朱砂/土黄） `thicknessMm` | 层位顺次叠压 |
+| PaintLayer 彩画层位 | `src/types/layer.ts` | `id` `elementId` `level`（由外至内，自动连续） `patternName`（旋子/和玺/苏式） `pigment`（石青/石绿/朱砂/土黄） `thicknessMm` | 层位顺次叠压；补录时选参照层的外侧 / 内侧，作废后自动收紧编号 |
 | Decay 病害记录 | `src/types/decay.ts` | `id` `layerId` `type`（起甲/剥落/空鼓/粉化/龟裂） `severity`（轻度/中度/重度） `areaCm2` `causeGuess` `repaired` | 同层位可叠加多条并汇总到殿宇 |
 | RepairStep 修复工序 | `src/types/repair.ts` | `id` `decayId` `seq` `name`（除尘/回贴/灌浆/补绘/封护） `material` `operator` `state`（未开始/进行中/已完成） | 拖拽排序，完成回写病害 |
 
-数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`decays` 表补充 `repairedAt` 索引，并为修复状态缺失的历史数据按 `updatedAt` 回填，升级逻辑写在 Dexie 的 `.upgrade()` 中。
+数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：
+
+- v2：`decays` 表补充 `repairedAt` 索引，并为修复状态缺失的历史数据按 `updatedAt` 回填，升级逻辑写在 Dexie 的 `.upgrade()` 中。
+- v3：层位编号规则化。层位不再自报层号，统一由「参照层 + 外侧/内侧」补录，每个构件的层位始终为由外至内的连续 1..n；作废某层后自动收紧。升级迁移把旧档案中的断号 / 重号（重号按登记时间先在外）收紧为连续编号，层位 id 不变——病害经 `layerId` 挂接，重排后仍留在原物理层，病害档案台显示的层号随之更新；同时回写 `element.layerCount`。
+- 除 Dexie 升级迁移外，应用启动（`main.ts` 调用 `reconcileLayerLevels()`）与备份导入完成后都会幂等整理一遍层位编号，旧档案里的断号下次打开即排好。
 
 ---
 
@@ -103,7 +107,7 @@ sologsb-1101/
 │   │   ├── hooks/                # useDecayFilter.ts useIdbTable.ts
 │   │   ├── pages/                # HallList.vue ElementDetail.vue DecayBoard.vue RepairPlan.vue BackupView.vue
 │   │   ├── router/               # index.ts
-│   │   ├── utils/                # severity.ts db.ts export.ts
+│   │   ├── utils/                # severity.ts db.ts export.ts layerOrder.ts reconcileLayers.ts
 │   │   ├── styles/               # main.css
 │   │   ├── App.vue main.ts env.d.ts
 │   ├── public/favicon.svg

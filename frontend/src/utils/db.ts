@@ -4,9 +4,10 @@ import type { Element } from '@/types/element'
 import type { PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
 import type { RepairStep } from '@/types/repair'
+import { compactLayerLevels } from '@/utils/layerOrder'
 
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 本地存储键名（localStorage 侧的少量元数据） */
 export const LS_KEYS = {
@@ -75,6 +76,44 @@ export class MuralArchDatabase extends Dexie {
               decay.repaired = false
             }
           })
+      })
+    // v3：层位编号规则化——每个构件的层位由外至内收紧为 1..n，
+    // 修正旧档案里的断号 / 重号；层位 id 不变，病害经 layerId 仍留在原层。
+    this.version(DB_VERSION)
+      .stores({
+        halls: 'id, name, era, structureType, roofType, updatedAt',
+        elements: 'id, hallId, position, status, updatedAt',
+        layers: 'id, elementId, level, patternName, pigment',
+        decays: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
+        repairSteps: 'id, decayId, seq, name, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const layersTable = tx.table<PaintLayer>('layers')
+        const elementsTable = tx.table<Element>('elements')
+        const [allLayers, allElements] = await Promise.all([layersTable.toArray(), elementsTable.toArray()])
+        const stamp = Date.now()
+
+        const byElement = new Map<string, PaintLayer[]>()
+        allLayers.forEach((layer) => {
+          const list = byElement.get(layer.elementId)
+          if (list) list.push(layer)
+          else byElement.set(layer.elementId, [layer])
+        })
+
+        const layerUpdates: PaintLayer[] = []
+        byElement.forEach((layers) => {
+          layerUpdates.push(...compactLayerLevels(layers, stamp))
+        })
+        const elementUpdates = allElements
+          .filter((element) => element.layerCount !== (byElement.get(element.id)?.length ?? 0))
+          .map((element) => ({
+            ...element,
+            layerCount: byElement.get(element.id)?.length ?? 0,
+            updatedAt: stamp
+          }))
+
+        if (layerUpdates.length > 0) await layersTable.bulkPut(layerUpdates)
+        if (elementUpdates.length > 0) await elementsTable.bulkPut(elementUpdates)
       })
   }
 }

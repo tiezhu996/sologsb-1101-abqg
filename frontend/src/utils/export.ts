@@ -6,6 +6,7 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import { reconcileLayerLevels } from '@/utils/reconcileLayers'
 
 /** 校验备份对象的必备字段，返回错误信息数组（为空表示通过） */
 export function validateBackup(input: unknown): { ok: boolean; errors: string[]; payload: BackupPayload | null } {
@@ -113,6 +114,8 @@ export async function importBackup(
       await db.repairSteps.bulkPut(payload.repairSteps)
     }
   )
+  // 旧备份里的层位可能带断号 / 重号：导入后即按由外至内收紧为 1..n
+  await reconcileLayerLevels()
   return {
     halls: payload.halls.length,
     elements: payload.elements.length,
@@ -184,7 +187,7 @@ export async function seedDemoData(): Promise<void> {
           hallId,
           position: '檐下',
           name: '前檐明间额枋',
-          layerCount: 2,
+          layerCount: 1,
           baseLayer: '一麻五灰',
           status: '待修',
           createdAt: now,

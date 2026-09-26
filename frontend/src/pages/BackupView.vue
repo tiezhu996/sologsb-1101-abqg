@@ -214,7 +214,9 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         </el-table-column>
       </el-table>
       <p class="muted storage-note">
-        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 1 → 2：decays 表补充 repairedAt 索引，修复状态缺失的历史数据按 updatedAt 回填；版本 2 →
+        3：彩画层位改由参照层外侧 / 内侧补录，每层编号由外至内强制连续，升级时把旧档案的断号 / 重号收紧为
+        1..n（层位 id 不变，病害仍留在原层）并回写构件层数。
       </p>
     </div>
 
