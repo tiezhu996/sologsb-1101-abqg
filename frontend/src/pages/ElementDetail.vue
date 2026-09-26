@@ -10,7 +10,7 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useHallStore } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
-import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
+import { PATTERN_NAMES, PIGMENTS, type LayerSide, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
 import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
 
 const route = useRoute()
@@ -49,12 +49,14 @@ const elementForm = reactive<{
 })
 
 const layerForm = reactive<{
-  level: number
+  anchorLayerId: string
+  side: LayerSide
   patternName: PatternName
   pigment: Pigment
   thicknessMm: number
 }>({
-  level: 1,
+  anchorLayerId: '',
+  side: 'inner',
   patternName: '旋子',
   pigment: '石青',
   thicknessMm: 1.5
@@ -80,7 +82,6 @@ const elementRules: FormRules = {
 }
 
 const layerRules: FormRules = {
-  level: [{ required: true, message: '请填写层位序号', trigger: 'change' }],
   thicknessMm: [{ required: true, message: '请填写厚度', trigger: 'change' }]
 }
 
@@ -267,14 +268,15 @@ function openLayerDialog(layer?: PaintLayer): void {
   }
   if (layer) {
     editingLayerId.value = layer.id
-    layerForm.level = layer.level
     layerForm.patternName = layer.patternName
     layerForm.pigment = layer.pigment
     layerForm.thicknessMm = layer.thicknessMm
   } else {
     editingLayerId.value = null
-    const levels = selectedLayers.value.map((item) => item.level)
-    layerForm.level = levels.length === 0 ? 1 : Math.max(...levels) + 1
+    // 默认贴在最里层的里侧（即追加到叠压序列末尾），层号由系统顺排
+    const siblings = selectedLayers.value
+    layerForm.anchorLayerId = siblings[siblings.length - 1]?.id ?? ''
+    layerForm.side = 'inner'
     layerForm.patternName = '旋子'
     layerForm.pigment = '石青'
     layerForm.thicknessMm = 1.5
@@ -282,20 +284,17 @@ function openLayerDialog(layer?: PaintLayer): void {
   layerDialogVisible.value = true
 }
 
+/** 编辑模式下回显当前层号（只读，编号由系统维护） */
+const editingLayerLevel = computed<number | null>(
+  () => selectedLayers.value.find((item) => item.id === editingLayerId.value)?.level ?? null
+)
+
 async function submitLayer(): Promise<void> {
   if (!layerFormRef.value || !selectedElement.value) return
   const valid = await layerFormRef.value.validate().catch(() => false)
   if (!valid) return
-  const duplicated = selectedLayers.value.some(
-    (layer) => layer.level === layerForm.level && layer.id !== editingLayerId.value
-  )
-  if (duplicated) {
-    ElMessage.warning(`层位序号 ${layerForm.level} 已存在，请更换`)
-    return
-  }
   if (editingLayerId.value) {
     await hallStore.updateLayer(editingLayerId.value, {
-      level: layerForm.level,
       patternName: layerForm.patternName,
       pigment: layerForm.pigment,
       thicknessMm: layerForm.thicknessMm
@@ -304,13 +303,14 @@ async function submitLayer(): Promise<void> {
   } else {
     const layer = await hallStore.createLayer({
       elementId: selectedElement.value.id,
-      level: layerForm.level,
+      anchorLayerId: layerForm.anchorLayerId || null,
+      side: layerForm.side,
       patternName: layerForm.patternName,
       pigment: layerForm.pigment,
       thicknessMm: layerForm.thicknessMm
     })
     expandedLayerIds.value = Array.from(new Set([...expandedLayerIds.value, layer.id]))
-    ElMessage.success('层位已新增')
+    ElMessage.success(`层位已新增为第 ${layer.level} 层，其余层号已自动顺移`)
   }
   layerTableKey.value += 1
   layerDialogVisible.value = false
@@ -318,13 +318,13 @@ async function submitLayer(): Promise<void> {
 
 async function removeLayer(layer: PaintLayer): Promise<void> {
   const confirmed = await ElMessageBox.confirm(
-    `删除第 ${layer.level} 层（${layer.patternName}）将同时删除该层病害记录，是否继续？`,
+    `删除第 ${layer.level} 层（${layer.patternName}）将同时删除该层病害记录，其余层号会自动收紧，是否继续？`,
     '删除确认',
     { type: 'warning' }
   ).catch(() => false)
   if (!confirmed) return
   await hallStore.removeLayer(layer.id)
-  ElMessage.success('层位已删除')
+  ElMessage.success('层位已删除，其余层号已收紧')
 }
 
 function openDecayDialog(layerId: string): void {
@@ -557,7 +557,11 @@ const severityOptions = SEVERITIES
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="由外至内" prop="level" width="100" />
+                <el-table-column label="由外至内" width="100">
+                  <template #default="{ row }">
+                    <span class="mono">第 {{ row.level }} 层</span>
+                  </template>
+                </el-table-column>
                 <el-table-column label="彩画做法" prop="patternName" width="110" />
                 <el-table-column label="主色颜料" width="110">
                   <template #default="{ row }">
@@ -599,7 +603,7 @@ const severityOptions = SEVERITIES
                 v-if="selectedLayers.length === 0"
                 compact
                 title="尚未圈定彩画层位"
-                description="按由外至内顺序逐层登记：层位序号、彩画做法、主色颜料与厚度。"
+                description="按由外至内顺序逐层登记：挑参照层位的里侧或外侧插入，层号自动连续。"
                 action-text="新增层位"
                 @action="openLayerDialog()"
               />
@@ -636,9 +640,31 @@ const severityOptions = SEVERITIES
 
     <el-dialog v-model="layerDialogVisible" :title="editingLayerId ? '编辑层位' : '新增彩画层位'" width="520px">
       <el-form ref="layerFormRef" :model="layerForm" :rules="layerRules" label-width="110px">
-        <el-form-item label="由外至内序号" prop="level">
-          <el-input-number v-model="layerForm.level" :min="1" :max="20" />
+        <el-form-item v-if="editingLayerId" label="由外至内">
+          <span class="muted">第 {{ editingLayerLevel ?? '-' }} 层（层号由系统按由外至内自动维护）</span>
         </el-form-item>
+        <template v-else>
+          <el-form-item v-if="selectedLayers.length > 0" label="参照层位" prop="anchorLayerId">
+            <el-select v-model="layerForm.anchorLayerId" class="full-width" placeholder="选择相邻的已有层位">
+              <el-option
+                v-for="item in selectedLayers"
+                :key="item.id"
+                :label="`第 ${item.level} 层 · ${item.patternName} · ${item.pigment}`"
+                :value="item.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="selectedLayers.length > 0" label="插入方位">
+            <el-radio-group v-model="layerForm.side">
+              <el-radio-button value="outer">外侧</el-radio-button>
+              <el-radio-button value="inner">里侧</el-radio-button>
+            </el-radio-group>
+            <span class="form-hint">外侧更靠近表面，里侧更靠近地仗；其余层号自动顺移</span>
+          </el-form-item>
+          <el-form-item v-else label="插入位置">
+            <span class="muted">首个层位，将作为第 1 层（最外层）</span>
+          </el-form-item>
+        </template>
         <el-form-item label="彩画做法" prop="patternName">
           <el-select v-model="layerForm.patternName" class="full-width">
             <el-option v-for="item in patternOptions" :key="item" :label="item" :value="item" />
@@ -761,6 +787,12 @@ const severityOptions = SEVERITIES
 
 .full-width {
   width: 100%;
+}
+
+.form-hint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: #8c8479;
 }
 
 @media (max-width: 900px) {

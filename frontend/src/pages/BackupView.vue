@@ -215,6 +215,7 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
       </el-table>
       <p class="muted storage-note">
         版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 2 → 3 的迁移：层位编号改由系统维护，旧档案的断号 / 重号按由外至内重排为连续编号，构件层数同步校正。
       </p>
     </div>
 

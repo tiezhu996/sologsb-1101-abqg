@@ -1,12 +1,12 @@
-import Dexie, { type Table } from 'dexie'
+import Dexie, { type Table, type Transaction } from 'dexie'
 import type { Hall } from '@/types/hall'
 import type { Element } from '@/types/element'
-import type { PaintLayer } from '@/types/layer'
+import { compareLayersByLevel, type PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
 import type { RepairStep } from '@/types/repair'
 
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 本地存储键名（localStorage 侧的少量元数据） */
 export const LS_KEYS = {
@@ -37,6 +37,45 @@ export interface BackupPayload {
   repairSteps: RepairStep[]
 }
 
+/**
+ * 层位编号连续化的核心逻辑（v3 迁移与备份导入共用）：
+ * 每个构件的层位按由外至内重排为 1..N 连续编号，断号收紧、重号按稳定次序顺移；
+ * 病害按 layerId 挂接，重排只改 level，病害仍留在原层。顺带校正构件 layerCount。
+ */
+async function normalizeLayerLevelsCore(
+  layerTable: Table<PaintLayer, string>,
+  elementTable: Table<Element, string>
+): Promise<void> {
+  const allLayers = await layerTable.toArray()
+  const byElement = new Map<string, PaintLayer[]>()
+  allLayers.forEach((layer) => {
+    const list = byElement.get(layer.elementId)
+    if (list) list.push(layer)
+    else byElement.set(layer.elementId, [layer])
+  })
+
+  const writes: Promise<unknown>[] = []
+  byElement.forEach((group) => {
+    group.sort(compareLayersByLevel).forEach((layer, index) => {
+      const target = index + 1
+      if (layer.level !== target) writes.push(layerTable.update(layer.id, { level: target }))
+    })
+  })
+
+  const elements = await elementTable.toArray()
+  elements.forEach((element) => {
+    const count = byElement.get(element.id)?.length ?? 0
+    if (element.layerCount !== count) writes.push(elementTable.update(element.id, { layerCount: count }))
+  })
+
+  await Promise.all(writes)
+}
+
+/** 把全部构件的层位编号收紧为连续（导入旧备份后调用；打开旧档案由 v3 迁移自动完成） */
+export async function normalizeAllLayerLevels(): Promise<void> {
+  await db.transaction('rw', [db.layers, db.elements], () => normalizeLayerLevelsCore(db.layers, db.elements))
+}
+
 export class MuralArchDatabase extends Dexie {
   halls!: Table<Hall, string>
   elements!: Table<Element, string>
@@ -54,7 +93,7 @@ export class MuralArchDatabase extends Dexie {
       repairSteps: 'id, decayId, seq, state, updatedAt'
     })
     // v2：病害表补充 repairedAt 索引，工序表补充 name 索引
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         halls: 'id, name, era, structureType, roofType, updatedAt',
         elements: 'id, hallId, position, status, updatedAt',
@@ -76,6 +115,18 @@ export class MuralArchDatabase extends Dexie {
             }
           })
       })
+    // v3：层位编号改由系统维护——旧档案的断号 / 重号按由外至内重排为连续编号，构件层数同步校正
+    this.version(DB_VERSION)
+      .stores({
+        halls: 'id, name, era, structureType, roofType, updatedAt',
+        elements: 'id, hallId, position, status, updatedAt',
+        layers: 'id, elementId, level, patternName, pigment',
+        decays: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
+        repairSteps: 'id, decayId, seq, name, state, updatedAt'
+      })
+      .upgrade((tx: Transaction) =>
+        normalizeLayerLevelsCore(tx.table<PaintLayer, string>('layers'), tx.table<Element, string>('elements'))
+      )
   }
 }
 

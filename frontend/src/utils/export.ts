@@ -3,6 +3,7 @@ import {
   DB_VERSION,
   createId,
   clearAllTables,
+  normalizeAllLayerLevels,
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
@@ -113,6 +114,8 @@ export async function importBackup(
       await db.repairSteps.bulkPut(payload.repairSteps)
     }
   )
+  // 旧备份可能带断号 / 重号：导入后立即把层位编号收紧为连续
+  await normalizeAllLayerLevels()
   return {
     halls: payload.halls.length,
     elements: payload.elements.length,
@@ -162,8 +165,9 @@ export async function seedDemoData(): Promise<void> {
   const now = Date.now()
   const hallId = createId('hall')
   const elementIds = [createId('elem'), createId('elem')]
-  const layerIds = elementIds.map(() => createId('lay'))
-  const decayIds = layerIds.map(() => createId('dec'))
+  // 额枋叠压两层（由外至内 1、2），七架梁一层，演示连续编号
+  const layerIds = [createId('lay'), createId('lay'), createId('lay')]
+  const decayIds = [createId('dec'), createId('dec')]
 
   await db.transaction(
     'rw',
@@ -215,6 +219,16 @@ export async function seedDemoData(): Promise<void> {
         },
         {
           id: layerIds[1],
+          elementId: elementIds[0],
+          level: 2,
+          patternName: '和玺',
+          pigment: '朱砂',
+          thicknessMm: 1.1,
+          createdAt: now,
+          updatedAt: now
+        },
+        {
+          id: layerIds[2],
           elementId: elementIds[1],
           level: 1,
           patternName: '苏式',
@@ -239,7 +253,7 @@ export async function seedDemoData(): Promise<void> {
         },
         {
           id: decayIds[1],
-          layerId: layerIds[1],
+          layerId: layerIds[2],
           type: '龟裂',
           severity: '中度',
           areaCm2: 158,
